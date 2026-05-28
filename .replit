@@ -13,5 +13,5 @@ run = ["sh", "-c", "pip install -r requirements.txt -q && python faa_ads_mcp.py"
 deploymentTarget = "cloudrun"
 
 [[ports]]
-localPort = 8080
+localPort = 8000
 externalPort = 80
