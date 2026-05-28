@@ -979,8 +979,101 @@ async def faa_get_ad_detail(params: AdDetailInput) -> str:
 
 
 # ---------------------------------------------------------------------------
+# REST API  (for web-app consumption; MCP tools served at /mcp)
+# ---------------------------------------------------------------------------
+
+from starlette.applications import Starlette
+from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Mount, Route
+import uvicorn
+
+
+async def _rest_ads(request: Request) -> JSONResponse:
+    make = request.query_params.get("make", "").strip()
+    model = request.query_params.get("model", "").strip()
+    year_str = request.query_params.get("year", "")
+    year = int(year_str) if year_str.isdigit() else None
+
+    if not make or not model:
+        return JSONResponse({"error": "make and model are required"}, status_code=400)
+
+    ck = f"faa:unified:{make.lower()}:{model.lower()}:{year or 'x'}"
+    cached = _cache_get(ck, TTL_ADS)
+    if cached:
+        return JSONResponse(cached.get("ads", []))
+
+    api_task, rgl_task = await asyncio.gather(
+        _api_search(make, model),
+        _rgl_search(make, model, max_results=500),
+    )
+    modern_ads: list[dict] = api_task
+    if not modern_ads:
+        modern_ads = await _portal_search(make, model)
+
+    historical_ads = [a for a in rgl_task if _is_historical(a["adNumber"])]
+
+    if year and modern_ads:
+        cutoff = year - 5
+        modern_ads = [
+            a for a in modern_ads
+            if not a["effectiveDate"] or int(a["effectiveDate"][:4]) >= cutoff
+        ]
+
+    seen: set[str] = set()
+    combined: list[dict] = []
+    for ad in modern_ads + historical_ads:
+        if ad["adNumber"] and ad["adNumber"] not in seen:
+            seen.add(ad["adNumber"])
+            combined.append(ad)
+
+    combined.sort(
+        key=lambda a: ("1" if a.get("effectiveDate") else "0", a.get("effectiveDate", "")),
+        reverse=True,
+    )
+
+    if combined:
+        _cache_set(ck, {"ads": combined})
+    return JSONResponse(combined)
+
+
+async def _rest_makes(request: Request) -> JSONResponse:
+    q = request.query_params.get("q", "").strip() or None
+    makes = await _api_get_makes(q)
+    return JSONResponse(makes)
+
+
+async def _rest_models(request: Request) -> JSONResponse:
+    make = request.query_params.get("make", "").strip()
+    q = request.query_params.get("q", "").strip() or None
+    if not make:
+        return JSONResponse({"error": "make is required"}, status_code=400)
+    models = await _api_get_models(make, q)
+    return JSONResponse(models)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    port = int(os.environ.get("PORT", "8000"))
+
+    mcp_asgi = mcp.streamable_http_app()
+
+    rest_routes = [
+        Route("/api/ads", _rest_ads),
+        Route("/api/makes", _rest_makes),
+        Route("/api/models", _rest_models),
+    ]
+
+    app: Any = Starlette(routes=[*rest_routes, Mount("/", app=mcp_asgi)])
+    app = CORSMiddleware(
+        app,
+        allow_origins=["*"],
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["*"],
+    )
+
+    uvicorn.run(app, host="0.0.0.0", port=port)
