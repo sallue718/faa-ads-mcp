@@ -1,0 +1,17 @@
+run = "pip install -r requirements.txt -q && python faa_ads_mcp.py"
+entrypoint = "faa_ads_mcp.py"
+modules = ["python-3.11"]
+
+[env]
+PORT = "8080"
+
+[nix]
+channel = "stable-24_05"
+
+[deployment]
+run = ["sh", "-c", "pip install -r requirements.txt -q && python faa_ads_mcp.py"]
+deploymentTarget = "cloudrun"
+
+[[ports]]
+localPort = 8080
+externalPort = 80
